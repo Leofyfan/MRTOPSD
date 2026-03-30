@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SMOKE_DATA_DIR="${SMOKE_DATA_DIR:-${ROOT_DIR}/data/processed_smoke}"
+
+export NUM_GPUS="${NUM_GPUS:-2}"
+export ROLLOUT_AGENT_NUM_WORKERS="${ROLLOUT_AGENT_NUM_WORKERS:-1}"
+export REWARD_NUM_WORKERS="${REWARD_NUM_WORKERS:-1}"
+export DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-0}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
+export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-128}"
+export TEACHER_MAX_MODEL_LEN="${TEACHER_MAX_MODEL_LEN:-6144}"
+export ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-3072}"
+export PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-4096}"
+export ROLLOUT_MAX_BATCHED_TOKENS="${ROLLOUT_MAX_BATCHED_TOKENS:-8192}"
+export TEACHER_MAX_BATCHED_TOKENS="${TEACHER_MAX_BATCHED_TOKENS:-16384}"
+export ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.35}"
+export TEACHER_GPU_MEMORY_UTILIZATION="${TEACHER_GPU_MEMORY_UTILIZATION:-0.35}"
+export TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
+export SAVE_FREQ="${SAVE_FREQ:-1}"
+export TEST_FREQ="${TEST_FREQ:-1}"
+export VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3_4b_opsd_verl_smoke}"
+export TRAIN_FILE="${TRAIN_FILE:-${SMOKE_DATA_DIR}/opsd_train.parquet}"
+export VAL_FILE="${VAL_FILE:-${SMOKE_DATA_DIR}/opsd_val.parquet}"
+
+bash "${ROOT_DIR}/scripts/prepare_opsd_verl_data.sh" \
+  --output-dir "${SMOKE_DATA_DIR}" \
+  --max-train-samples 4 \
+  --max-val-samples 4 \
+  --max-student-prompt-length "${MAX_PROMPT_LENGTH}" \
+  --max-teacher-prompt-length "$((TEACHER_MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))"
+
+bash "${ROOT_DIR}/scripts/run_opsd_4b_verl.sh"

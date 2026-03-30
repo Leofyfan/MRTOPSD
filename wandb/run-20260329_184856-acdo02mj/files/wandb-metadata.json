@@ -1,0 +1,14 @@
+{
+  "os":  "Linux-5.15.0-78-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.12.3",
+  "startedAt":  "2026-03-29T10:48:56.034584Z",
+  "program":  "<stdin>",
+  "git":  {
+    "remote":  "https://github.com/siyan-zhao/OPSD.git",
+    "commit":  "0622e0ae62eadfa869ad1397a960b40044ab7388"
+  },
+  "root":  "/root/MRTOPSD",
+  "host":  "autodl-container-fu642y22eg-373186fc",
+  "executable":  "/root/autodl-tmp/MRTOPSD-ENV/bin/python",
+  "writerId":  "1ktpgcvdbps61bww1o67fdyqts369bdz"
+}

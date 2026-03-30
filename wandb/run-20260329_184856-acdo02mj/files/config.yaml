@@ -1,0 +1,31 @@
+_wandb:
+    value:
+        cli_version: 0.22.3
+        e:
+            1ktpgcvdbps61bww1o67fdyqts369bdz:
+                executable: /root/autodl-tmp/MRTOPSD-ENV/bin/python
+                git:
+                    commit: 0622e0ae62eadfa869ad1397a960b40044ab7388
+                    remote: https://github.com/siyan-zhao/OPSD.git
+                host: autodl-container-fu642y22eg-373186fc
+                os: Linux-5.15.0-78-generic-x86_64-with-glibc2.35
+                program: <stdin>
+                python: CPython 3.12.3
+                root: /root/MRTOPSD
+                startedAt: "2026-03-29T10:48:56.034584Z"
+                writerId: 1ktpgcvdbps61bww1o67fdyqts369bdz
+        m: []
+        python_version: 3.12.3
+        t:
+            "1":
+                - 105
+            "2":
+                - 105
+            "3":
+                - 2
+                - 13
+                - 15
+            "4": 3.12.3
+            "5": 0.22.3
+            "12": 0.22.3
+            "13": linux-x86_64
