@@ -23,6 +23,8 @@ REWARD_NUM_WORKERS="${REWARD_NUM_WORKERS:-${DEFAULT_WORKER_COUNT}}"
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-${DEFAULT_WORKER_COUNT}}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-${DEFAULT_TRAIN_BATCH_SIZE}}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-${DEFAULT_MICRO_BATCH_SIZE}}"
+MAX_TRAIN_SAMPLES="${MAX_TRAIN_SAMPLES:--1}"
+MAX_VAL_SAMPLES="${MAX_VAL_SAMPLES:--1}"
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-65536}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-1024}"
@@ -38,9 +40,25 @@ TEST_FREQ="${TEST_FREQ:-200}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-2}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 WANDB_LOGGER="${WANDB_LOGGER:-[\"console\",\"wandb\"]}"
+LOG_VAL_GENERATIONS="${LOG_VAL_GENERATIONS:-16}"
+LOG_VAL_ERROR_GENERATIONS="${LOG_VAL_ERROR_GENERATIONS:-16}"
+VAL_REPEAT_N="${VAL_REPEAT_N:-1}"
+VAL_DO_SAMPLE="${VAL_DO_SAMPLE:-False}"
+VAL_TEMPERATURE="${VAL_TEMPERATURE:-0.0}"
+VAL_TOP_P="${VAL_TOP_P:-1.0}"
+VAL_TOP_K="${VAL_TOP_K:--1}"
 ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-False}"
 ACTOR_OPTIMIZER_OFFLOAD="${ACTOR_OPTIMIZER_OFFLOAD:-False}"
 REF_PARAM_OFFLOAD="${REF_PARAM_OFFLOAD:-False}"
+TEACHER_ENABLE_RESOURCE_POOL="${TEACHER_ENABLE_RESOURCE_POOL:-False}"
+OPSD_RUBRIC_ENABLED="${OPSD_RUBRIC_ENABLED:-true}"
+OPSD_RUBRIC_WARMUP_STEPS="${OPSD_RUBRIC_WARMUP_STEPS:-100}"
+OPSD_RUBRIC_MIX_STEPS="${OPSD_RUBRIC_MIX_STEPS:-300}"
+OPSD_RUBRIC_SEED="${OPSD_RUBRIC_SEED:-0}"
+OPSD_RUBRIC_MIN_RESPONSE_CHARS="${OPSD_RUBRIC_MIN_RESPONSE_CHARS:-32}"
+OPSD_RUBRIC_MAX_PENDING_REQUESTS="${OPSD_RUBRIC_MAX_PENDING_REQUESTS:-128}"
+ROLLOUT_DATA_DIR="${ROLLOUT_DATA_DIR:-${OUTPUT_DIR}/rollout_data}"
+ROLLOUT_ERROR_DATA_DIR="${ROLLOUT_ERROR_DATA_DIR:-${OUTPUT_DIR}/rollout_error_data}"
 
 parquet_num_rows() {
   local parquet_path="$1"
@@ -51,6 +69,23 @@ from datasets import load_dataset
 path = sys.argv[1]
 dataset = load_dataset("parquet", data_files=path)["train"]
 print(len(dataset))
+PY
+}
+
+parquet_prompt_format_version() {
+  local parquet_path="$1"
+  "${ENV_DIR}/bin/python" - "$parquet_path" <<'PY'
+import sys
+from datasets import load_dataset
+
+path = sys.argv[1]
+dataset = load_dataset("parquet", data_files=path)["train"]
+if len(dataset) == 0:
+    print("")
+else:
+    row = dataset[0]
+    extra_info = row.get("extra_info") or {}
+    print(extra_info.get("prompt_format_version", ""))
 PY
 }
 
@@ -69,6 +104,8 @@ prepare_dataset_if_needed() {
     --output-dir "${train_parent}" \
     --train-file "$(basename "${TRAIN_FILE}")" \
     --val-file "$(basename "${VAL_FILE}")" \
+    --max-train-samples "${MAX_TRAIN_SAMPLES}" \
+    --max-val-samples "${MAX_VAL_SAMPLES}" \
     --max-student-prompt-length "${MAX_PROMPT_LENGTH}" \
     --max-teacher-prompt-length "$((TEACHER_MAX_MODEL_LEN - MAX_RESPONSE_LENGTH))"
 }
@@ -78,8 +115,12 @@ if [[ ! -f "${TRAIN_FILE}" || ! -f "${VAL_FILE}" ]]; then
 else
   TRAIN_ROWS="$(parquet_num_rows "${TRAIN_FILE}")"
   VAL_ROWS="$(parquet_num_rows "${VAL_FILE}")"
+  PROMPT_FORMAT_VERSION="$(parquet_prompt_format_version "${TRAIN_FILE}")"
   if (( TRAIN_ROWS < TRAIN_BATCH_SIZE || VAL_ROWS < 1 )); then
     echo "Detected undersized parquet data: train_rows=${TRAIN_ROWS}, val_rows=${VAL_ROWS}, train_batch_size=${TRAIN_BATCH_SIZE}. Rebuilding dataset." >&2
+    prepare_dataset_if_needed
+  elif [[ "${PROMPT_FORMAT_VERSION}" != "opsd_boxed_last_line_v2" ]]; then
+    echo "Detected outdated prompt format in parquet data (${PROMPT_FORMAT_VERSION:-missing}). Rebuilding dataset." >&2
     prepare_dataset_if_needed
   fi
 fi
@@ -168,12 +209,17 @@ CMD=(
   "actor_rollout_ref.rollout.agent.num_workers=${ROLLOUT_AGENT_NUM_WORKERS}"
   "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True"
   "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}"
+  "actor_rollout_ref.rollout.val_kwargs.n=${VAL_REPEAT_N}"
+  "actor_rollout_ref.rollout.val_kwargs.do_sample=${VAL_DO_SAMPLE}"
+  "actor_rollout_ref.rollout.val_kwargs.temperature=${VAL_TEMPERATURE}"
+  "actor_rollout_ref.rollout.val_kwargs.top_p=${VAL_TOP_P}"
+  "actor_rollout_ref.rollout.val_kwargs.top_k=${VAL_TOP_K}"
   "actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True"
   "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU}"
   "actor_rollout_ref.ref.fsdp_config.param_offload=${REF_PARAM_OFFLOAD}"
   "distillation.enabled=True"
   "distillation.num_workers=${NUM_GPUS}"
-  "distillation.teacher_model.enable_resource_pool=False"
+  "distillation.teacher_model.enable_resource_pool=${TEACHER_ENABLE_RESOURCE_POOL}"
   "distillation.teacher_model.model_path=${MODEL_DIR}"
   "distillation.teacher_model.n_gpus_per_node=${NUM_GPUS}"
   "distillation.teacher_model.nnodes=${NNODES}"
@@ -191,13 +237,23 @@ CMD=(
   "distillation.distillation_loss.use_policy_gradient=False"
   "distillation.distillation_loss.loss_max_clamp=0.05"
   "distillation.distillation_loss.log_prob_min_clamp=-10.0"
+  "+opsd_rubric.enabled=${OPSD_RUBRIC_ENABLED}"
+  "+opsd_rubric.warmup_steps=${OPSD_RUBRIC_WARMUP_STEPS}"
+  "+opsd_rubric.mix_steps=${OPSD_RUBRIC_MIX_STEPS}"
+  "+opsd_rubric.seed=${OPSD_RUBRIC_SEED}"
+  "+opsd_rubric.min_response_chars=${OPSD_RUBRIC_MIN_RESPONSE_CHARS}"
+  "+opsd_rubric.max_pending_requests=${OPSD_RUBRIC_MAX_PENDING_REQUESTS}"
   "trainer.use_legacy_worker_impl=disable"
   "trainer.val_before_train=${VAL_BEFORE_TRAIN}"
   "trainer.critic_warmup=0"
   "trainer.logger=${WANDB_LOGGER}"
+  "trainer.log_val_generations=${LOG_VAL_GENERATIONS}"
+  "trainer.log_val_error_generations=${LOG_VAL_ERROR_GENERATIONS}"
   "trainer.project_name=${PROJECT_NAME}"
   "trainer.experiment_name=${EXPERIMENT_NAME}"
   "trainer.default_local_dir=${OUTPUT_DIR}"
+  "trainer.rollout_data_dir=${ROLLOUT_DATA_DIR}"
+  "trainer.rollout_error_data_dir=${ROLLOUT_ERROR_DATA_DIR}"
   "trainer.n_gpus_per_node=${NUM_GPUS}"
   "trainer.nnodes=${NNODES}"
   "trainer.save_freq=${SAVE_FREQ}"

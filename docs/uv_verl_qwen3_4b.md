@@ -77,3 +77,8 @@ NUM_GPUS=4 ROLLOUT_TP=1 TEACHER_TP=1 bash scripts/run_opsd_4b_verl.sh
 ```
 
 `run_opsd_4b_verl.sh` now defaults to a dual-GPU setup with `TOTAL_EPOCHS=2`. For Qwen3-4B on 2 GPUs, keeping `ROLLOUT_TP=1` and `TEACHER_TP=1` usually gives better throughput because it creates two single-GPU data-parallel inference replicas instead of one tensor-parallel replica.
+
+For the current end-to-end training logic, see:
+
+- [verl_training_logic.md](/root/MRTOPSD/docs/verl_training_logic.md)
+- [verl_framework_full_flow.md](/root/MRTOPSD/docs/verl_framework_full_flow.md)

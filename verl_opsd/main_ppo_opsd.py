@@ -1,4 +1,4 @@
-"""Launch verl PPO with OPSD-specific teacher prompt handling."""
+"""Launch verl PPO with OPSD-specific rubric-conditioned teacher prompt handling."""
 
 import os
 

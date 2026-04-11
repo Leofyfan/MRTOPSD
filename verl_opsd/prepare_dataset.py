@@ -7,13 +7,18 @@ from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer
 
 
+FINAL_ANSWER_INSTRUCTION = (
+    "Please reason step by step, keep the reasoning concise, and on the last line output only "
+    "\\boxed{your final answer}. Do not write anything after the boxed answer."
+)
+
 TRANSITION_PROMPT = (
     "\n\nAfter reading the reference solution above, make sure you truly understand "
     "the reasoning behind each step — do not copy or paraphrase it. Now, using your "
     "own words and independent reasoning, derive the same final answer to the problem above. "
     "Think step by step, explore different approaches, and don't be afraid to backtrack "
     "or reconsider if something doesn't work out:\n\n"
-    "Please reason step by step, and put your final answer within \\boxed{}."
+    f"{FINAL_ANSWER_INSTRUCTION}"
 )
 
 
@@ -21,7 +26,7 @@ def build_student_messages(problem: str) -> list[dict[str, str]]:
     return [
         {
             "role": "user",
-            "content": f"Problem: {problem}\n\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+            "content": f"Problem: {problem}\n\n{FINAL_ANSWER_INSTRUCTION}",
         }
     ]
 
@@ -63,9 +68,11 @@ def convert_split(
     dropped_teacher = 0
 
     for idx, row in enumerate(dataset):
+        sample_idx = row.get("global_row_idx", idx)
         problem = row["problem"]
         solution = row["solution"]
         answer = row.get("Answer") or row.get("answer") or ""
+        problem_id = f"opsd-problem-{sample_idx}"
 
         student_messages = build_student_messages(problem)
         teacher_messages = build_teacher_messages(problem, solution)
@@ -86,12 +93,15 @@ def convert_split(
                 "data_source": "math_dapo",
                 "reward_model": {"ground_truth": answer},
                 "extra_info": {
-                    "index": idx,
+                    "index": sample_idx,
+                    "problem_id": problem_id,
+                    "prompt_format_version": "opsd_boxed_last_line_v2",
                     "teacher_prompt_text": teacher_prompt_text,
                     "student_prompt_length": student_prompt_length,
                     "teacher_prompt_length": teacher_prompt_length,
                 },
-                "uid": f"opsd-{idx}",
+                "uid": f"opsd-{sample_idx}",
+                "problem_id": problem_id,
                 "problem": problem,
                 "solution": solution,
                 "answer": answer,
@@ -123,6 +133,7 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     dataset = load_dataset(args.dataset, split="train")
+    dataset = dataset.add_column("global_row_idx", list(range(len(dataset))))
     split = dataset.train_test_split(test_size=args.val_ratio, seed=args.seed)
     train_split = split["train"]
     val_split = split["test"]
