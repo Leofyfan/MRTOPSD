@@ -9,59 +9,105 @@ PYTHON_BIN=${ENV_DIR}/bin/python
 MODEL_DIR=/home/shenyl/hf/model/Qwen/Qwen3-1.7B
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+# Override this when the two A6000 cards are not physical 0,1, e.g.
+# CUDA_VISIBLE_DEVICES=0,5 bash scripts/run_train_a6000_2gpu.sh
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export NCCL_P2P_DISABLE=1
-# export TOKENIZERS_PARALLELISM=false
+unset RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+export NCCL_CUMEM_ENABLE=0
+export TOKENIZERS_PARALLELISM=false
+# RTX A6000 is sm_86. Pinning the arch avoids vLLM/Torch extensions compiling
+# kernels for every visible card architecture during TP worker startup.
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
+# Override verl's default Ray runtime (`VLLM_DISABLE_COMPILE_CACHE=1`) so vLLM
+# can reuse compiled kernels across retries instead of recompiling every run.
+export VLLM_DISABLE_COMPILE_CACHE="${VLLM_DISABLE_COMPILE_CACHE:-0}"
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
+    unset PYTORCH_CUDA_ALLOC_CONF
+fi
 export VERL_USE_OPSD_TEACHER=1
 
 ROLLOUT_NAME="vllm"
 PROJECT_NAME="opsd_verl"
 
-TRAIN_FILE="${ROOT_DIR}/data/processed_new/opsd_train.parquet"
+TRAIN_FILE="${ROOT_DIR}/data/train/opsd_train.parquet"
 VAL_FILE="${ROOT_DIR}/data/processed_new/opsd_val.parquet"
 AIME24_VAL_FILE="${ROOT_DIR}/data/benchmarks/aime24_official_eval.parquet"
-# AIME25_VAL_FILE="${ROOT_DIR}/data/benchmarks/aime25_official_eval.parquet"
-# HMMT25_VAL_FILE="${ROOT_DIR}/data/benchmarks/hmmt25_official_eval.parquet"
-VAL_FILES="['${VAL_FILE}','${AIME24_VAL_FILE}']"
+AIME25_VAL_FILE="${ROOT_DIR}/data/benchmarks/aime25_official_eval.parquet"
+HMMT25_VAL_FILE="${ROOT_DIR}/data/benchmarks/hmmt25_official_eval.parquet"
+VAL_FILES="['${AIME24_VAL_FILE}','${AIME25_VAL_FILE}','${HMMT25_VAL_FILE}']"
 
-MAX_PROMPT=8192
-MAX_RESPONSE_LENGTH=8192
-MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 256 ))
+############################ Sequence / Batch Sizes ############################
+
+# Keep run_train.sh lengths. Student vLLM context must cover the longer eval path.
+MAX_PROMPT=4096
+MAX_RESPONSE_LENGTH=4096
+VAL_RESPONSE_LENGTH=${VAL_RESPONSE_LENGTH:-32768}
+TRAIN_MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 256 ))
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-$(( MAX_PROMPT + VAL_RESPONSE_LENGTH + 256 ))}
+ROLLOUT_MAX_BATCHED_TOKENS=${ROLLOUT_MAX_BATCHED_TOKENS:-${ROLLOUT_MAX_MODEL_LEN}}
+VAL_MAX_TOKENS=${VAL_MAX_TOKENS:-${VAL_RESPONSE_LENGTH}}
 
 TRAIN_PROMPT_BSZ=32
-STUDENT_MICRO_BATCH_SIZE_PER_GPU=8
-STUDENT_MAX_TOKEN_LEN_PER_GPU=16640
+# Keep validation waves small on the single rollout engine. With VAL_REPEAT_N=16,
+# val_batch_size=4 gives about 64 requests per wave, matching max_num_seqs.
+VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-4}
+STUDENT_MICRO_BATCH_SIZE_PER_GPU=16
+STUDENT_MAX_TOKEN_LEN_PER_GPU=${TRAIN_MAX_NUM_TOKENS}
 USE_DYNAMIC_BSZ=True
 
-STUDENT_WORLD_SIZE=4
-TEACHER_RESOURCE_POOL=False
-TEACHER_WORLD_SIZE=4
+############################ GPU Topology: 2x RTX A6000 ############################
 
-ROLLOUT_TP=4
-TEACHER_TP=4
-ROLLOUT_MAX_NUM_SEQS=8
-TEACHER_MAX_NUM_SEQS=8
+# Student rollout uses TP=1. Keep internal vLLM DP at 1 by default because
+# vLLM DP>1 + dynamic LoRA can make non-primary DP workers reload the placeholder
+# LoRA path (`simon_lora_path`) during generation instead of using the tensor
+# LoRA that verl pushed via IPC, causing adapter_config.json/HF download errors.
+STUDENT_WORLD_SIZE=2
+ROLLOUT_TP=1
+ROLLOUT_DP=${ROLLOUT_DP:-1}
+
+# Teacher follows the reference script's opposite layout: TP=2, DP=1.
+# It shards the teacher vLLM engine over both A6000 cards during train-time
+# teacher logprob computation. The teacher is slept outside compute_logprobs.
+TEACHER_RESOURCE_POOL=False
+TEACHER_WORLD_SIZE=2
+TEACHER_TP=1
+
+# A6000 has 48GB, while the pasted reference was calibrated for 80GB H800.
+# Keep concurrency higher than run_train.sh (16) but below the H800 setting (256).
+ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-64}
+TEACHER_MAX_NUM_SEQS=${TEACHER_MAX_NUM_SEQS:-64}
+
+TEACHER_REQUIRED_CONTEXT_LEN=$(( MAX_PROMPT + MAX_RESPONSE_LENGTH + 1 ))
+# OPSD teacher prompt can be longer than the raw student prompt.
+OPSD_TEACHER_PROMPT_EXTRA_TOKENS=${OPSD_TEACHER_PROMPT_EXTRA_TOKENS:-$(( MAX_PROMPT / 2 ))}
+TEACHER_MAX_MODEL_LEN=${TEACHER_MAX_MODEL_LEN:-$(( TEACHER_REQUIRED_CONTEXT_LEN + OPSD_TEACHER_PROMPT_EXTRA_TOKENS + 2048 ))}
+TEACHER_MAX_BATCHED_TOKENS=${TEACHER_MAX_BATCHED_TOKENS:-${TEACHER_MAX_MODEL_LEN}}
+VLLM_DTYPE="float16"
 
 SAVE_FREQ=400
-TEST_FREQ=25
+TEST_FREQ=10
 TOTAL_EPOCHS=2
-VAL_REPEAT_N=4
+VAL_REPEAT_N=16
 
 DISTILLATION_LOSS_MODE="forward_kl_topk"
-USE_POLICY_GRADIENT=True
+USE_POLICY_GRADIENT=False
 DISTILLATION_TOPK=128
 DISTILLATION_LOSS_MAX_CLAMP=0.05
 DISTILLATION_LOG_PROB_MIN_CLAMP=-10.0
 
-ROLLOUT_GPU_MEMORY_UTILIZATION=0.75
-TEACHER_GPU_MEMORY_UTILIZATION=0.65
+# Conservative A6000 colocation budgets. Increase only after checking peak memory.
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.38}
+TEACHER_GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.18}
 
 LORA_RANK=32
 LORA_ALPHA=64
 
 MODEL_TAG="$(basename "${MODEL_DIR}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g; s/_\\+/_/g; s/^_//; s/_$//')"
 LOSS_TAG="$(echo "${DISTILLATION_LOSS_MODE}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g; s/_\\+/_/g; s/^_//; s/_$//')"
-EXP_NAME="${MODEL_TAG}_mrtopsd_${LOSS_TAG}_official_eval_bs${TRAIN_PROMPT_BSZ}_mb${STUDENT_MICRO_BATCH_SIZE_PER_GPU}_ws${STUDENT_WORLD_SIZE}_seq${ROLLOUT_MAX_NUM_SEQS}"
+RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+EXP_NAME="${MODEL_TAG}_${DISTILLATION_LOSS_MODE}_${DISTILLATION_TOPK}_${USE_POLICY_GRADIENT}_a6000x2_baseline_${LOSS_TAG}_official_eval_bs${TRAIN_PROMPT_BSZ}_mb${STUDENT_MICRO_BATCH_SIZE_PER_GPU}_ws${STUDENT_WORLD_SIZE}_seq${ROLLOUT_MAX_NUM_SEQS}_${RUN_TIMESTAMP}"
 OUTPUT_DIR="${ROOT_DIR}/outputs/${EXP_NAME}"
 
 ############################ Runtime Paths ############################
@@ -84,7 +130,7 @@ export WANDB_PROJECT="${WANDB_PROJECT:-${PROJECT_NAME}}"
 export WANDB_NAME="${WANDB_NAME:-${EXP_NAME}}"
 export WANDB_API_KEY="${WANDB_API_KEY-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}"
 export VERL_LOGGING_LEVEL=INFO
-export VERL_ZMQ_NAMESPACE="u$(id -u)-$(date +%s)-official-eval"
+export VERL_ZMQ_NAMESPACE="u$(id -u)-$(date +%s)-official-eval-a6000x2"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 
@@ -110,6 +156,7 @@ DATA=(
     data.max_prompt_length=${MAX_PROMPT}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.train_batch_size=${TRAIN_PROMPT_BSZ}
+    data.val_batch_size=${VAL_BATCH_SIZE}
     data.filter_overlong_prompts=True
     data.dataloader_num_workers=4
     data.truncation=error
@@ -127,6 +174,7 @@ MODEL=(
     actor_rollout_ref.model.path="${MODEL_DIR}"
     actor_rollout_ref.model.trust_remote_code=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.model.enable_activation_offload=True
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.lora_rank=${LORA_RANK}
     actor_rollout_ref.model.lora_alpha=${LORA_ALPHA}
@@ -156,18 +204,20 @@ STUDENT=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=${ROLLOUT_NAME}
+    actor_rollout_ref.rollout.dtype=${VLLM_DTYPE}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
+    actor_rollout_ref.rollout.data_parallel_size=${ROLLOUT_DP}
     actor_rollout_ref.rollout.n=1
     actor_rollout_ref.rollout.temperature=1.1
     actor_rollout_ref.rollout.top_p=0.95
     actor_rollout_ref.rollout.top_k=20
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION}
-    actor_rollout_ref.rollout.enforce_eager=False
+    actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.load_format=safetensors
     actor_rollout_ref.rollout.prompt_length=${MAX_PROMPT}
     actor_rollout_ref.rollout.response_length=${MAX_RESPONSE_LENGTH}
-    actor_rollout_ref.rollout.max_model_len=${MAX_NUM_TOKENS}
-    actor_rollout_ref.rollout.max_num_batched_tokens=8192
+    actor_rollout_ref.rollout.max_model_len=${ROLLOUT_MAX_MODEL_LEN}
+    actor_rollout_ref.rollout.max_num_batched_tokens=${ROLLOUT_MAX_BATCHED_TOKENS}
     actor_rollout_ref.rollout.max_num_seqs=${ROLLOUT_MAX_NUM_SEQS}
     actor_rollout_ref.rollout.agent.num_workers=8
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
@@ -179,25 +229,28 @@ ROLLOUT=(
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
     +actor_rollout_ref.rollout.val_kwargs.min_p=0.0
     +actor_rollout_ref.rollout.val_kwargs.presence_penalty=0.0
-    +actor_rollout_ref.rollout.val_kwargs.max_tokens=38912
+    +actor_rollout_ref.rollout.val_kwargs.max_tokens=${VAL_MAX_TOKENS}
+    +actor_rollout_ref.rollout.val_kwargs.response_length=${VAL_RESPONSE_LENGTH}
     +actor_rollout_ref.rollout.val_kwargs.enable_thinking=True
 )
 
 DISTILLATION=(
     distillation.enabled=True
-    distillation.num_workers=8
+    distillation.num_workers=1
     distillation.teacher_model.enable_resource_pool=${TEACHER_RESOURCE_POOL}
     distillation.teacher_model.model_path="${MODEL_DIR}"
     distillation.teacher_model.n_gpus_per_node=${TEACHER_WORLD_SIZE}
     distillation.teacher_model.nnodes=1
     distillation.teacher_model.inference.name=${ROLLOUT_NAME}
+    distillation.teacher_model.inference.dtype=${VLLM_DTYPE}
     distillation.teacher_model.inference.tensor_model_parallel_size=${TEACHER_TP}
     distillation.teacher_model.inference.temperature=1.0
     distillation.teacher_model.inference.gpu_memory_utilization=${TEACHER_GPU_MEMORY_UTILIZATION}
-    distillation.teacher_model.inference.enforce_eager=False
-    distillation.teacher_model.inference.max_model_len=${MAX_NUM_TOKENS}
-    distillation.teacher_model.inference.max_num_batched_tokens=${MAX_NUM_TOKENS}
+    distillation.teacher_model.inference.enforce_eager=True
+    distillation.teacher_model.inference.max_model_len=${TEACHER_MAX_MODEL_LEN}
+    distillation.teacher_model.inference.max_num_batched_tokens=${TEACHER_MAX_BATCHED_TOKENS}
     distillation.teacher_model.inference.max_num_seqs=${TEACHER_MAX_NUM_SEQS}
+    +distillation.teacher_model.inference.engine_kwargs.vllm.disable_custom_all_reduce=True
     distillation.distillation_loss.loss_mode=${DISTILLATION_LOSS_MODE}
     distillation.distillation_loss.topk=${DISTILLATION_TOPK}
     distillation.distillation_loss.use_task_rewards=False
@@ -207,7 +260,7 @@ DISTILLATION=(
 )
 
 RUBRIC=(
-    +opsd_rubric.enabled=true
+    +opsd_rubric.enabled=False
     +opsd_rubric.warmup_steps=10
     +opsd_rubric.mix_steps=30
     +opsd_rubric.seed=0
@@ -226,7 +279,7 @@ TRAINER=(
     trainer.save_freq=${SAVE_FREQ}
     trainer.test_freq=${TEST_FREQ}
     trainer.total_epochs=${TOTAL_EPOCHS}
-    trainer.val_before_train=False
+    trainer.val_before_train=True
     trainer.use_legacy_worker_impl=disable
     trainer.critic_warmup=0
     trainer.resume_mode=disable
@@ -235,8 +288,14 @@ TRAINER=(
 )
 
 RUNTIME=(
-    reward.num_workers=4
+    reward.num_workers=8
     "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_P2P_DISABLE='1'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_CUMEM_ENABLE='0'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_OPSD_TEACHER='${VERL_USE_OPSD_TEACHER}'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL='INFO'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.TORCH_CUDA_ARCH_LIST='${TORCH_CUDA_ARCH_LIST}'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_DISABLE_COMPILE_CACHE='${VLLM_DISABLE_COMPILE_CACHE}'"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_WORKER_MULTIPROC_METHOD='${VLLM_WORKER_MULTIPROC_METHOD}'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='${ROOT_DIR}:${ROOT_DIR}/third_party/verl'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_MODE='${WANDB_MODE}'"
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_ENTITY='${WANDB_ENTITY}'"

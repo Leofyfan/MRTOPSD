@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-from verl_opsd.rubric_prompting import RubricPayload
+from verl_opsd.rubric_prompting import DynamicRubricPayload, RubricPayload
 
 __all__ = [
     "RolloutObservation",
@@ -21,6 +22,12 @@ class RolloutObservation:
     score: float
     acc: float
     global_step: int
+    prompt_text: str = ""
+    teacher_prompt_text: str = ""
+    data_source: str = ""
+    uid: str = ""
+    request_id: str = ""
+    extra_info: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +37,7 @@ class RubricEntry:
     rubric_version: int
     updated_step: int
     course_stage: str
-    rubric_payload: RubricPayload
+    rubric_payload: RubricPayload | DynamicRubricPayload
     correct_example_summary: str
     wrong_example_summary: str
 

@@ -8,9 +8,9 @@ from transformers import AutoTokenizer
 
 
 FINAL_ANSWER_INSTRUCTION = (
-    "Please reason step by step, keep the reasoning concise, and on the last line output only "
-    "\\boxed{your final answer}. Do not write anything after the boxed answer."
+    "\n\nPlease reason step by step, and put your final answer within \\boxed{}."
 )
+
 
 TRANSITION_PROMPT = (
     "\n\nAfter reading the reference solution above, make sure you truly understand "
